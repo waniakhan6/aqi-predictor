@@ -81,9 +81,9 @@ def push_to_feature_store(df: pd.DataFrame):
 
     feature_group = fs.get_or_create_feature_group(
         name="aqi_features",
-        version=1,
+        version=2,
         description="Hourly AQI, pollutant, and weather features for Karachi",
-        primary_key=["city"],
+        primary_key=["city", "date", "hour"],
         event_time="timestamp",
         online_enabled=True,
         time_travel_format="HUDI",
