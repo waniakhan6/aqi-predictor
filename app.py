@@ -85,14 +85,25 @@ def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
     aqi_rolling_3 = df["aqi"].tail(3).mean()
     aqi_change_rate = df["aqi"].iloc[-1] - df["aqi"].iloc[-2] if len(df) >= 2 else 0.0
 
-    row = {col: latest.get(col) for col in ["pm10", "o3", "no2", "so2", "co",
-                                              "temperature", "humidity", "pressure", "wind_speed",
-                                              "hour", "day", "month", "day_of_week"]}
+    base_cols = ["pm10", "o3", "no2", "so2", "co",
+                 "temperature", "humidity", "pressure", "wind_speed",
+                 "hour", "day", "month", "day_of_week"]
+    row = {col: latest.get(col) for col in base_cols}
     row["aqi_lag_1"] = aqi_lag_1
     row["aqi_rolling_3"] = aqi_rolling_3
     row["aqi_change_rate"] = aqi_change_rate
 
-    return pd.DataFrame([row])[FEATURE_COLS]
+    feature_df = pd.DataFrame([row])[FEATURE_COLS]
+
+    # If the latest row is missing any values (e.g. the live station only
+    # reports pm25), fall back to the recent median for that column - same
+    # approach used during training, so predictions don't break on NaN.
+    for col in FEATURE_COLS:
+        if pd.isna(feature_df[col].iloc[0]):
+            fallback = df[col].median() if col in df.columns else None
+            feature_df.at[0, col] = fallback if pd.notna(fallback) else 0
+
+    return feature_df
 
 
 def main():
