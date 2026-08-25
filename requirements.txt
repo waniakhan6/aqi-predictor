@@ -50,7 +50,7 @@ SQLAlchemy==2.0.41
 threadpoolctl==3.6.0
 tomli_w==1.2.0
 tqdm==4.70.0
-twofish @ file:///D:/bld/twofish_1667112699190/work
+
 typing_extensions==4.16.0
 tzdata==2026.3
 tzlocal==5.4.4
