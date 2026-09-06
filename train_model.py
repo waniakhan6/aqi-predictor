@@ -34,6 +34,7 @@ HOPSWORKS_PROJECT_NAME = os.getenv("HOPSWORKS_PROJECT_NAME")
 # Weather columns excluded too - still ~99% missing (see fetch_features.py notes).
 FEATURE_COLS = [
     "pm10", "o3", "no2", "so2", "co",
+    "temperature", "humidity", "pressure", "wind_speed",
     "hour", "day", "month", "day_of_week",
     "aqi_lag_1", "aqi_rolling_3", "aqi_change_rate",
 ]
@@ -58,12 +59,23 @@ def load_data() -> pd.DataFrame:
 def engineer_extra_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add lag, rolling average, and AQI change-rate features (as required by the spec)."""
     df = df.copy()
+
+    # The live AQICN station only ever reports pm25 - pm10/o3/no2/so2/co
+    # are always NaN for live rows. Imputing those with a median gets
+    # WORSE over time as more live-only rows accumulate (dilutes the
+    # dataset with guessed values). Instead, drop rows missing real
+    # pollutant data BEFORE computing lag/rolling features, so those
+    # features aren't computed across artificial gaps in the timeline.
+    pollutant_cols = ["pm10", "o3", "no2", "so2", "co"]
+    df = df.dropna(subset=pollutant_cols).sort_values("timestamp").reset_index(drop=True)
+
     df["aqi_lag_1"] = df["aqi"].shift(1)
     df["aqi_rolling_3"] = df["aqi"].rolling(window=3).mean()
     df["aqi_change_rate"] = df["aqi"].diff()
 
-    pollutant_cols = ["pm10", "o3", "no2", "so2", "co"]
-    for col in pollutant_cols:
+    # Weather IS reported live by AQICN, so a light median fill there is fine.
+    weather_cols = ["temperature", "humidity", "pressure", "wind_speed"]
+    for col in weather_cols:
         df[col] = df[col].fillna(df[col].median())
 
     return df
