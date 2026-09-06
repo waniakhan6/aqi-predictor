@@ -1,6 +1,6 @@
 # Pearls AQI Predictor
 
-A serverless, end-to-end machine learning pipeline that forecasts Karachi's Air Quality Index (AQI) up to **3 days ahead** — built as a data science internship project.
+A serverless, end-to-end machine learning pipeline that forecasts Karachi's Air Quality Index (AQI) up to **3 days ahead**  built as a data science internship project.
 
 ## Overview
 
@@ -96,4 +96,4 @@ See [`Pearls_AQI_Predictor_Report.pdf`](./Pearls_AQI_Predictor_Report.pdf) for t
 
 ## Author
 
-Wania Khan — BS Computer Science, Jinnah University for Women, Karachi
+Wania Khan BS Computer Science, Jinnah University for Women, Karachi
