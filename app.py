@@ -30,24 +30,85 @@ FEATURE_COLS = [
 ]
 HORIZONS = [24, 48, 72]
 
+# Palette: dark slate background with a teal/cyan accent (matches .streamlit/config.toml)
+ACCENT = "#2DD4BF"
+CATEGORY_COLORS = {
+    "Good": "#22C55E",
+    "Moderate": "#EAB308",
+    "Unhealthy (Sensitive Groups)": "#F97316",
+    "Unhealthy": "#EF4444",
+    "Very Unhealthy": "#A855F7",
+    "Hazardous": "#7F1D1D",
+    "Unknown": "#64748B",
+}
+
 st.set_page_config(page_title="Karachi AQI Forecast", page_icon="🌫️", layout="centered")
+
+st.markdown(
+    f"""
+    <style>
+    .card {{
+        background-color: #1E293B;
+        border: 1px solid #334155;
+        border-radius: 14px;
+        padding: 20px 22px;
+        margin-bottom: 18px;
+    }}
+    .forecast-card {{
+        background-color: #1E293B;
+        border-radius: 14px;
+        padding: 18px 14px;
+        text-align: center;
+        border-top: 4px solid {ACCENT};
+    }}
+    .badge {{
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: white;
+        margin-top: 6px;
+    }}
+    .section-title {{
+        font-size: 1.15rem;
+        font-weight: 700;
+        margin-top: 6px;
+        margin-bottom: 10px;
+        color: #F1F5F9;
+    }}
+    .metric-big {{
+        font-size: 3rem;
+        font-weight: 800;
+        color: {ACCENT};
+        line-height: 1;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def aqi_category(aqi: float):
-    """US EPA AQI category, label + color, for display."""
+    """US EPA AQI category, for display."""
     if aqi is None:
-        return "Unknown", "gray"
+        return "Unknown"
     if aqi <= 50:
-        return "Good", "green"
+        return "Good"
     if aqi <= 100:
-        return "Moderate", "yellow"
+        return "Moderate"
     if aqi <= 150:
-        return "Unhealthy (Sensitive Groups)", "orange"
+        return "Unhealthy (Sensitive Groups)"
     if aqi <= 200:
-        return "Unhealthy", "red"
+        return "Unhealthy"
     if aqi <= 300:
-        return "Very Unhealthy", "purple"
-    return "Hazardous", "maroon"
+        return "Very Unhealthy"
+    return "Hazardous"
+
+
+def badge_html(category: str) -> str:
+    color = CATEGORY_COLORS.get(category, "#64748B")
+    return f'<span class="badge" style="background-color:{color};">{category}</span>'
 
 
 @st.cache_resource
@@ -96,9 +157,6 @@ def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
     row = {col: latest.get(col) for col in FEATURE_COLS}
     feature_df = pd.DataFrame([row])[FEATURE_COLS]
 
-    # If the latest row is missing any values (e.g. the live station only
-    # reports pm25), fall back to the recent median for that column - same
-    # approach used during training, so predictions don't break on NaN.
     for col in FEATURE_COLS:
         if pd.isna(feature_df[col].iloc[0]):
             fallback = df[col].median() if col in df.columns else None
@@ -108,8 +166,11 @@ def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    st.title("🌫️ Karachi AQI Forecast")
-    st.caption("Pearls AQI Predictor — live data, 3-day forecast")
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>🌫️ Karachi AQI Forecast</h1>"
+        "<p style='color:#94A3B8; margin-top:4px;'>Pearls AQI Predictor — live data, 3-day forecast</p>",
+        unsafe_allow_html=True,
+    )
 
     project = get_project()
     df = load_recent_features(project)
@@ -119,17 +180,25 @@ def main():
         return
 
     current_aqi = df["aqi"].iloc[-1]
-    category, color = aqi_category(current_aqi)
+    category = aqi_category(current_aqi)
 
-    st.metric("Current AQI (Karachi)", f"{current_aqi:.0f}")
-    st.markdown(f"**Status:** :{color}[{category}]")
+    st.markdown(
+        f"""
+        <div class="card">
+            <div style="color:#94A3B8; font-size:0.95rem;">Current AQI — Karachi</div>
+            <div class="metric-big">{current_aqi:.0f}</div>
+            {badge_html(category)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if current_aqi is not None and current_aqi > 150:
         st.error("⚠️ Hazardous air quality — limit outdoor activity.")
 
     df = add_engineered_features(df)
 
-    st.subheader("3-Day Forecast")
+    st.markdown('<div class="section-title">3-Day Forecast</div>', unsafe_allow_html=True)
     feature_vector = build_current_feature_vector(df)
 
     cols = st.columns(len(HORIZONS))
@@ -137,20 +206,30 @@ def main():
         model = load_model(project, horizon)
         with col:
             if model is None:
-                st.write(f"**+{horizon}h**")
-                st.write("Model not available")
+                st.markdown(
+                    f'<div class="forecast-card"><b>+{horizon}h</b><br>Model not available</div>',
+                    unsafe_allow_html=True,
+                )
                 continue
             pred = model.predict(feature_vector)[0]
-            pred_category, pred_color = aqi_category(pred)
-            st.write(f"**+{horizon}h**")
-            st.metric(label="", value=f"{pred:.0f}")
-            st.markdown(f":{pred_color}[{pred_category}]")
+            pred_category = aqi_category(pred)
+            st.markdown(
+                f"""
+                <div class="forecast-card">
+                    <div style="color:#94A3B8; font-weight:600;">+{horizon}h</div>
+                    <div style="font-size:2rem; font-weight:800; color:{ACCENT};">{pred:.0f}</div>
+                    {badge_html(pred_category)}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    st.subheader("Recent AQI Trend")
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Recent AQI Trend</div>', unsafe_allow_html=True)
     trend_df = df[["timestamp", "aqi"]].set_index("timestamp")
-    st.line_chart(trend_df)
+    st.line_chart(trend_df, color=ACCENT)
 
-    st.subheader("Why this forecast? (Feature Importance)")
+    st.markdown('<div class="section-title">Why this forecast? (Feature Importance)</div>', unsafe_allow_html=True)
     st.caption("Which features most influence the 24h-ahead prediction, based on recent data.")
     model_24h = load_model(project, 24)
     shap_background = df.dropna(subset=["aqi_lag_1"]).reset_index(drop=True)
@@ -164,8 +243,10 @@ def main():
             explainer = shap.Explainer(model_24h, background)
             shap_values = explainer(background)
 
-            fig, ax = plt.subplots()
-            shap.summary_plot(shap_values, background, plot_type="bar", show=False)
+            plt.style.use("dark_background")
+            fig, ax = plt.subplots(facecolor="#0F172A")
+            ax.set_facecolor("#0F172A")
+            shap.summary_plot(shap_values, background, plot_type="bar", show=False, color=ACCENT)
             st.pyplot(fig)
             plt.close(fig)
         except Exception as e:
