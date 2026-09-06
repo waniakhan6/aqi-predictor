@@ -2,7 +2,8 @@
 Dashboard - Pearls AQI Predictor
 Streamlit app that loads the latest features + the 3 saved forecast
 models (24h/48h/72h) from Hopsworks, shows the current AQI, a 3-day
-forecast, a historical trend chart, and a hazard alert banner.
+forecast, a historical trend chart with AQI threshold bands, and
+SHAP-based feature importance.
 
 Run: streamlit run app.py
 """
@@ -11,9 +12,11 @@ import os
 import glob
 import joblib
 import pandas as pd
+import numpy as np
 import streamlit as st
 import shap
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from dotenv import load_dotenv
 import hopsworks
 
@@ -30,85 +33,35 @@ FEATURE_COLS = [
 ]
 HORIZONS = [24, 48, 72]
 
-# Palette: dark slate background with a teal/cyan accent (matches .streamlit/config.toml)
-ACCENT = "#2DD4BF"
-CATEGORY_COLORS = {
-    "Good": "#22C55E",
-    "Moderate": "#EAB308",
-    "Unhealthy (Sensitive Groups)": "#F97316",
-    "Unhealthy": "#EF4444",
-    "Very Unhealthy": "#A855F7",
-    "Hazardous": "#7F1D1D",
-    "Unknown": "#64748B",
-}
+# Official US EPA AQI category colors and breakpoints - the standard any
+# air-quality dashboard uses, rather than an arbitrary decorative palette.
+# Each entry also carries the text color needed for readable contrast on
+# that background (e.g. yellow needs dark text, not light).
+AQI_BANDS = [
+    (0, 50, "Good", "#00E400", "#1B1B1F"),
+    (50, 100, "Moderate", "#FFDE33", "#1B1B1F"),
+    (100, 150, "Unhealthy (Sensitive Groups)", "#FF9933", "#1B1B1F"),
+    (150, 200, "Unhealthy", "#CC0033", "#FFFFFF"),
+    (200, 300, "Very Unhealthy", "#660099", "#FFFFFF"),
+    (300, 500, "Hazardous", "#7E0023", "#FFFFFF"),
+]
 
-st.set_page_config(page_title="Karachi AQI Forecast", page_icon="🌫️", layout="centered")
+# Palette accents (beige/navy/sage/rust) used for chrome around the
+# AQI colors, which stay standard for readability.
+ACCENT_NAVY = "#242953"
+ACCENT_RUST = "#5C2E1F"
+BG_CREAM = "#FBF3E7"
 
-st.markdown(
-    f"""
-    <style>
-    .card {{
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        border-radius: 14px;
-        padding: 20px 22px;
-        margin-bottom: 18px;
-    }}
-    .forecast-card {{
-        background-color: #1E293B;
-        border-radius: 14px;
-        padding: 18px 14px;
-        text-align: center;
-        border-top: 4px solid {ACCENT};
-    }}
-    .badge {{
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 999px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: white;
-        margin-top: 6px;
-    }}
-    .section-title {{
-        font-size: 1.15rem;
-        font-weight: 700;
-        margin-top: 6px;
-        margin-bottom: 10px;
-        color: #F1F5F9;
-    }}
-    .metric-big {{
-        font-size: 3rem;
-        font-weight: 800;
-        color: {ACCENT};
-        line-height: 1;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.set_page_config(page_title="Karachi AQI Forecast", page_icon="📊", layout="wide")
 
 
-def aqi_category(aqi: float):
-    """US EPA AQI category, for display."""
-    if aqi is None:
-        return "Unknown"
-    if aqi <= 50:
-        return "Good"
-    if aqi <= 100:
-        return "Moderate"
-    if aqi <= 150:
-        return "Unhealthy (Sensitive Groups)"
-    if aqi <= 200:
-        return "Unhealthy"
-    if aqi <= 300:
-        return "Very Unhealthy"
-    return "Hazardous"
-
-
-def badge_html(category: str) -> str:
-    color = CATEGORY_COLORS.get(category, "#64748B")
-    return f'<span class="badge" style="background-color:{color};">{category}</span>'
+def aqi_category_color(aqi: float):
+    if aqi is None or pd.isna(aqi):
+        return "Unknown", "#9E9E9E", "#FFFFFF"
+    for low, high, label, color, text_color in AQI_BANDS:
+        if low < aqi <= high or (low == 0 and aqi <= high):
+            return label, color, text_color
+    return "Hazardous", AQI_BANDS[-1][3], AQI_BANDS[-1][4]
 
 
 @st.cache_resource
@@ -117,7 +70,7 @@ def get_project():
 
 
 @st.cache_data(ttl=600)
-def load_recent_features(_project, n_rows: int = 72):
+def load_recent_features(_project, n_rows: int = 168):
     fs = _project.get_feature_store()
     fg = fs.get_feature_group(name="aqi_features", version=2)
     df = fg.read()
@@ -126,23 +79,22 @@ def load_recent_features(_project, n_rows: int = 72):
 
 
 @st.cache_resource
-def load_model(_project, horizon_hours: int):
+def load_model_with_metrics(_project, horizon_hours: int):
     model_name = f"aqi_predictor_{horizon_hours}h"
     mr = _project.get_model_registry()
     models = mr.get_models(name=model_name)
     if not models:
-        return None
+        return None, None
     best = max(models, key=lambda m: int(m.version))
     model_dir = best.download()
     pkl_files = glob.glob(os.path.join(model_dir, "*.pkl"))
     if not pkl_files:
-        return None
-    return joblib.load(pkl_files[0])
+        return None, None
+    model = joblib.load(pkl_files[0])
+    return model, best.training_metrics
 
 
 def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute lag/rolling/change-rate features across the whole dataframe (not just one row) -
-    needed both for the current prediction and for SHAP's background dataset."""
     df = df.copy().sort_values("timestamp").reset_index(drop=True)
     df["aqi_lag_1"] = df["aqi"].shift(1)
     df["aqi_rolling_3"] = df["aqi"].rolling(window=3).mean()
@@ -151,8 +103,6 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
-    """Build the single-row feature vector (matching training schema) from the latest data.
-    Expects df to already have aqi_lag_1/aqi_rolling_3/aqi_change_rate (see add_engineered_features)."""
     latest = df.iloc[-1].copy()
     row = {col: latest.get(col) for col in FEATURE_COLS}
     feature_df = pd.DataFrame([row])[FEATURE_COLS]
@@ -165,12 +115,34 @@ def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
     return feature_df
 
 
+def plot_trend_with_bands(df: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(9, 3.2), facecolor=BG_CREAM)
+    ax.set_facecolor(BG_CREAM)
+
+    y_max = max(220, df["aqi"].max() * 1.15)
+    for low, high, label, color, _ in AQI_BANDS:
+        if low >= y_max:
+            continue
+        ax.axhspan(low, min(high, y_max), color=color, alpha=0.15, lw=0)
+
+    ax.plot(df["timestamp"], df["aqi"], color=ACCENT_NAVY, linewidth=1.8)
+    ax.scatter(df["timestamp"].iloc[[-1]], df["aqi"].iloc[[-1]], color=ACCENT_NAVY, s=32, zorder=5)
+
+    ax.set_ylim(0, y_max)
+    ax.set_ylabel("AQI (US EPA)", color="#1B1B1F")
+    ax.tick_params(colors="#1B1B1F")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.spines[["left", "bottom"]].set_color("#1B1B1F")
+    ax.grid(axis="y", color="#D9CBB5", linewidth=0.8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
 def main():
-    st.markdown(
-        "<h1 style='margin-bottom:0;'>🌫️ Karachi AQI Forecast</h1>"
-        "<p style='color:#94A3B8; margin-top:4px;'>Pearls AQI Predictor — live data, 3-day forecast</p>",
-        unsafe_allow_html=True,
-    )
+    st.title("Karachi AQI Forecast")
+    st.caption("Pearls AQI Predictor — feature pipeline, forecasting models, and explainability, refreshed hourly.")
 
     project = get_project()
     df = load_recent_features(project)
@@ -179,59 +151,67 @@ def main():
         st.error("No data found in the feature store yet.")
         return
 
+    df = add_engineered_features(df)
     current_aqi = df["aqi"].iloc[-1]
-    category = aqi_category(current_aqi)
+    last_updated = df["timestamp"].iloc[-1]
+    category, bg_color, text_color = aqi_category_color(current_aqi)
 
-    st.markdown(
-        f"""
-        <div class="card">
-            <div style="color:#94A3B8; font-size:0.95rem;">Current AQI — Karachi</div>
-            <div class="metric-big">{current_aqi:.0f}</div>
-            {badge_html(category)}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    top_left, top_right = st.columns([2, 1])
+    with top_left:
+        st.metric("Current AQI — Karachi", f"{current_aqi:.0f}", help="US EPA Air Quality Index scale, 0-500.")
+        st.markdown(
+            f'<span style="background-color:{bg_color}; color:{text_color}; '
+            f'padding:3px 12px; border-radius:4px; font-weight:600; font-size:0.85rem;">'
+            f'{category}</span>',
+            unsafe_allow_html=True,
+        )
+    with top_right:
+        st.caption(f"Last reading: {last_updated.strftime('%b %d, %Y %H:%M UTC')}")
+        st.caption(f"Rows in feature store window: {len(df)}")
 
     if current_aqi is not None and current_aqi > 150:
-        st.error("⚠️ Hazardous air quality — limit outdoor activity.")
+        st.warning("Air quality is in the Unhealthy range or worse. Limiting prolonged outdoor exertion is advisable.")
 
-    df = add_engineered_features(df)
+    st.divider()
+    st.subheader("3-Day Forecast")
 
-    st.markdown('<div class="section-title">3-Day Forecast</div>', unsafe_allow_html=True)
     feature_vector = build_current_feature_vector(df)
-
     cols = st.columns(len(HORIZONS))
     for col, horizon in zip(cols, HORIZONS):
-        model = load_model(project, horizon)
+        model, metrics = load_model_with_metrics(project, horizon)
         with col:
             if model is None:
-                st.markdown(
-                    f'<div class="forecast-card"><b>+{horizon}h</b><br>Model not available</div>',
-                    unsafe_allow_html=True,
-                )
+                st.write(f"+{horizon}h — model not available")
                 continue
             pred = model.predict(feature_vector)[0]
-            pred_category = aqi_category(pred)
+            pred_category, pred_bg, pred_text = aqi_category_color(pred)
+            rmse = metrics.get("rmse") if metrics else None
+
+            st.metric(f"+{horizon}h", f"{pred:.0f}")
             st.markdown(
-                f"""
-                <div class="forecast-card">
-                    <div style="color:#94A3B8; font-weight:600;">+{horizon}h</div>
-                    <div style="font-size:2rem; font-weight:800; color:{ACCENT};">{pred:.0f}</div>
-                    {badge_html(pred_category)}
-                </div>
-                """,
+                f'<span style="background-color:{pred_bg}; color:{pred_text}; '
+                f'padding:2px 10px; border-radius:4px; font-size:0.8rem; font-weight:600;">'
+                f'{pred_category}</span>',
                 unsafe_allow_html=True,
             )
+            if rmse is not None:
+                st.caption(f"Model RMSE: ±{rmse:.1f}")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Recent AQI Trend</div>', unsafe_allow_html=True)
-    trend_df = df[["timestamp", "aqi"]].set_index("timestamp")
-    st.line_chart(trend_df, color=ACCENT)
+    st.caption(
+        "Forecasts carry meaningful uncertainty (see RMSE above) — training data currently spans "
+        "roughly one month for one city, which limits accuracy at longer horizons."
+    )
 
-    st.markdown('<div class="section-title">Why this forecast? (Feature Importance)</div>', unsafe_allow_html=True)
-    st.caption("Which features most influence the 24h-ahead prediction, based on recent data.")
-    model_24h = load_model(project, 24)
+    st.divider()
+    st.subheader("Recent AQI Trend")
+    st.pyplot(plot_trend_with_bands(df))
+    st.caption("Shaded bands mark US EPA AQI categories (Good → Hazardous).")
+
+    st.divider()
+    st.subheader("Feature Importance (24h model)")
+    st.caption("Mean absolute SHAP value per feature — which inputs most influence the 24h-ahead prediction.")
+
+    model_24h, _ = load_model_with_metrics(project, 24)
     shap_background = df.dropna(subset=["aqi_lag_1"]).reset_index(drop=True)
     if model_24h is not None and len(shap_background) >= 10:
         try:
@@ -243,19 +223,30 @@ def main():
             explainer = shap.Explainer(model_24h, background)
             shap_values = explainer(background)
 
-            plt.style.use("dark_background")
-            fig, ax = plt.subplots(facecolor="#0F172A")
-            ax.set_facecolor("#0F172A")
-            shap.summary_plot(shap_values, background, plot_type="bar", show=False, color=ACCENT)
+            mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
+            importance = pd.Series(mean_abs_shap, index=FEATURE_COLS).sort_values()
+
+            fig, ax = plt.subplots(figsize=(8, 5), facecolor=BG_CREAM)
+            ax.set_facecolor(BG_CREAM)
+            ax.barh(importance.index, importance.values, color=ACCENT_RUST)
+            ax.set_xlabel("mean(|SHAP value|)", color="#1B1B1F")
+            ax.tick_params(colors="#1B1B1F")
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.spines[["left", "bottom"]].set_color("#1B1B1F")
+            ax.grid(axis="x", color="#D9CBB5", linewidth=0.8)
+            fig.tight_layout()
             st.pyplot(fig)
-            plt.close(fig)
         except Exception as e:
             st.info(f"SHAP explanation not available right now ({e}).")
     else:
         st.info("Not enough data yet to compute feature importance.")
 
-    with st.expander("Show raw recent data"):
-        st.dataframe(df[["timestamp", "aqi", "pm25", "pm10", "temperature", "humidity"]])
+    st.divider()
+    with st.expander("Raw recent data"):
+        st.dataframe(
+            df[["timestamp", "aqi", "pm25", "pm10", "temperature", "humidity"]],
+            use_container_width=True,
+        )
 
 
 if __name__ == "__main__":
