@@ -71,7 +71,7 @@ def load_model(_project, horizon_hours: int):
     models = mr.get_models(name=model_name)
     if not models:
         return None
-    best = max(models, key=lambda m: m.version)
+    best = max(models, key=lambda m: int(m.version))
     model_dir = best.download()
     pkl_files = glob.glob(os.path.join(model_dir, "*.pkl"))
     if not pkl_files:
@@ -79,22 +79,21 @@ def load_model(_project, horizon_hours: int):
     return joblib.load(pkl_files[0])
 
 
+def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute lag/rolling/change-rate features across the whole dataframe (not just one row) -
+    needed both for the current prediction and for SHAP's background dataset."""
+    df = df.copy().sort_values("timestamp").reset_index(drop=True)
+    df["aqi_lag_1"] = df["aqi"].shift(1)
+    df["aqi_rolling_3"] = df["aqi"].rolling(window=3).mean()
+    df["aqi_change_rate"] = df["aqi"].diff()
+    return df
+
+
 def build_current_feature_vector(df: pd.DataFrame) -> pd.DataFrame:
-    """Build the single-row feature vector (matching training schema) from the latest data."""
+    """Build the single-row feature vector (matching training schema) from the latest data.
+    Expects df to already have aqi_lag_1/aqi_rolling_3/aqi_change_rate (see add_engineered_features)."""
     latest = df.iloc[-1].copy()
-
-    aqi_lag_1 = df["aqi"].iloc[-2] if len(df) >= 2 else df["aqi"].iloc[-1]
-    aqi_rolling_3 = df["aqi"].tail(3).mean()
-    aqi_change_rate = df["aqi"].iloc[-1] - df["aqi"].iloc[-2] if len(df) >= 2 else 0.0
-
-    base_cols = ["pm10", "o3", "no2", "so2", "co",
-                 "temperature", "humidity", "pressure", "wind_speed",
-                 "hour", "day", "month", "day_of_week"]
-    row = {col: latest.get(col) for col in base_cols}
-    row["aqi_lag_1"] = aqi_lag_1
-    row["aqi_rolling_3"] = aqi_rolling_3
-    row["aqi_change_rate"] = aqi_change_rate
-
+    row = {col: latest.get(col) for col in FEATURE_COLS}
     feature_df = pd.DataFrame([row])[FEATURE_COLS]
 
     # If the latest row is missing any values (e.g. the live station only
@@ -128,6 +127,8 @@ def main():
     if current_aqi is not None and current_aqi > 150:
         st.error("⚠️ Hazardous air quality — limit outdoor activity.")
 
+    df = add_engineered_features(df)
+
     st.subheader("3-Day Forecast")
     feature_vector = build_current_feature_vector(df)
 
@@ -152,9 +153,14 @@ def main():
     st.subheader("Why this forecast? (Feature Importance)")
     st.caption("Which features most influence the 24h-ahead prediction, based on recent data.")
     model_24h = load_model(project, 24)
-    if model_24h is not None and len(df) >= 10:
+    shap_background = df.dropna(subset=["aqi_lag_1"]).reset_index(drop=True)
+    if model_24h is not None and len(shap_background) >= 10:
         try:
-            background = df[FEATURE_COLS].fillna(df[FEATURE_COLS].median())
+            background = shap_background[FEATURE_COLS].copy()
+            for col in FEATURE_COLS:
+                median = background[col].median()
+                background[col] = background[col].fillna(median if pd.notna(median) else 0)
+
             explainer = shap.Explainer(model_24h, background)
             shap_values = explainer(background)
 
