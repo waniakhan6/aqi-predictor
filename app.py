@@ -12,6 +12,8 @@ import glob
 import joblib
 import pandas as pd
 import streamlit as st
+import shap
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 import hopsworks
 
@@ -146,6 +148,24 @@ def main():
     st.subheader("Recent AQI Trend")
     trend_df = df[["timestamp", "aqi"]].set_index("timestamp")
     st.line_chart(trend_df)
+
+    st.subheader("Why this forecast? (Feature Importance)")
+    st.caption("Which features most influence the 24h-ahead prediction, based on recent data.")
+    model_24h = load_model(project, 24)
+    if model_24h is not None and len(df) >= 10:
+        try:
+            background = df[FEATURE_COLS].fillna(df[FEATURE_COLS].median())
+            explainer = shap.Explainer(model_24h, background)
+            shap_values = explainer(background)
+
+            fig, ax = plt.subplots()
+            shap.summary_plot(shap_values, background, plot_type="bar", show=False)
+            st.pyplot(fig)
+            plt.close(fig)
+        except Exception as e:
+            st.info(f"SHAP explanation not available right now ({e}).")
+    else:
+        st.info("Not enough data yet to compute feature importance.")
 
     with st.expander("Show raw recent data"):
         st.dataframe(df[["timestamp", "aqi", "pm25", "pm10", "temperature", "humidity"]])
