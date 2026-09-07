@@ -7,3 +7,4 @@ scikit-learn
 joblib
 tensorflow
 pyarrow
+confluent-kafka
