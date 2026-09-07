@@ -6,3 +6,4 @@ hopsworks
 scikit-learn
 joblib
 tensorflow
+pyarrow
